@@ -77,25 +77,6 @@ python src/api.py
 
 Interactive API documentation is available at `http://localhost:8000/docs`
 
-## 🏗️ Project Structure
-
-```
-kg-qa-system/
-├── config/
-│   └── config.py          # Configuration management
-├── data/                  # Data storage
-├── src/
-│   ├── api.py            # FastAPI application
-│   ├── qa_system.py      # Core QA system
-│   ├── database/
-│   │   └── neo4j_client.py  # Neo4j database client
-│   └── nlp/
-│       └── processor.py  # NLP processing utilities
-├── tests/                # Test suite
-├── .env                  # Environment variables
-├── requirements.txt      # Python dependencies
-└── README.md            # Project documentation
-```
 
 ## 🧪 Testing
 
@@ -103,14 +84,6 @@ Run the test suite:
 ```bash
 pytest tests/
 ```
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
 
 ### Development Setup
 
