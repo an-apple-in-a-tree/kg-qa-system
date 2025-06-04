@@ -1,107 +1,78 @@
-from typing import Dict, Any, List
-import logging
-from database.neo4j_client import Neo4jClient
-from nlp.processor import NLPProcessor
+from typing import Tuple, List
+import spacy
+from transformers import AutoTokenizer, AutoModel
+import torch
+import networkx as nx
 from config.config import settings
-
-logger = logging.getLogger(__name__)
+from src.db.neo4j_client import Neo4jClient
+from src.nlp.processor import NLPProcessor
 
 class QASystem:
     def __init__(self):
-        self.db_client = Neo4jClient()
-        self.nlp_processor = NLPProcessor()
+        self.nlp = spacy.load(settings.SPACY_MODEL)
+        self.tokenizer = AutoTokenizer.from_pretrained(settings.MODEL_NAME)
+        self.model = AutoModel.from_pretrained(settings.MODEL_NAME)
+        
+        self.db = Neo4jClient(
+            uri=settings.NEO4J_URI,
+            user=settings.NEO4J_USER,
+            password=settings.NEO4J_PASSWORD
+        )
+        
+        self.nlp_processor = NLPProcessor(self.nlp, self.tokenizer, self.model)
     
-    def process_question(self, question: str) -> Dict[str, Any]:
-        try:
-            # Process the question using NLP
-            processed_question = self.nlp_processor.process_question(question)
+    def answer_question(self, question: str, max_hops: int = None, similarity_threshold: float = None) -> Tuple[str, float, List[str]]:
+        if max_hops is None:
+            max_hops = settings.MAX_HOPS
+        if similarity_threshold is None:
+            similarity_threshold = settings.SIMILARITY_THRESHOLD
             
-            # Extract entities from the question
-            entities = processed_question["entities"]
-            if not entities:
-                return {
-                    "answer": "I couldn't identify any specific entities in your question. Could you please rephrase it?",
-                    "confidence": 0.0
-                }
+        question_embedding = self.nlp_processor.get_embedding(question)
+        question_entities = self.nlp_processor.extract_entities(question)
+        
+        relevant_nodes = self.db.find_similar_nodes(question_embedding, similarity_threshold)
+        
+        if not relevant_nodes:
+            return "I'm sorry, I couldn't find any relevant information to answer your question.", 0.0, []
+        
+        subgraph = self.db.build_subgraph(relevant_nodes, max_hops)
+        
+        best_path = self._find_best_path(subgraph, question_entities)
+        
+        if not best_path:
+            return "I'm sorry, I couldn't find a clear path to answer your question.", 0.0, []
+        
+        answer = self._generate_answer(best_path)
+        confidence = self._calculate_confidence(best_path, question_embedding)
+        
+        return answer, confidence, best_path
+    
+    def _find_best_path(self, graph: nx.Graph, entities: List[str]) -> List[str]:
+        if not graph.nodes():
+            return []
             
-            # Search for entities in the knowledge graph
-            relevant_entities = []
-            for entity in entities:
-                db_entities = self.db_client.get_entity_by_name(entity["text"])
-                relevant_entities.extend(db_entities)
+        start_node = max(graph.nodes(), key=lambda x: graph.degree(x))
+        paths = nx.single_source_shortest_path(graph, start_node)
+        
+        best_path = []
+        max_entity_matches = 0
+        
+        for target, path in paths.items():
+            entity_matches = sum(1 for entity in entities if entity in str(path))
+            if entity_matches > max_entity_matches:
+                max_entity_matches = entity_matches
+                best_path = path
+                
+        return best_path
+    
+    def _generate_answer(self, path: List[str]) -> str:
+        if not path:
+            return "I couldn't find a clear answer."
             
-            if not relevant_entities:
-                return {
-                    "answer": "I couldn't find any relevant information in the knowledge base for your question.",
-                    "confidence": 0.0
-                }
+        return f"Based on the information in the knowledge graph, {' -> '.join(path)}"
+    
+    def _calculate_confidence(self, path: List[str], question_embedding: torch.Tensor) -> float:
+        if not path:
+            return 0.0
             
-            # Get relationships for the most relevant entity
-            primary_entity = relevant_entities[0]
-            relationships = self.db_client.get_relationships(primary_entity["id"])
-            
-            # Generate answer based on question type and available information
-            answer = self._generate_answer(
-                question,
-                processed_question["question_type"],
-                primary_entity,
-                relationships
-            )
-            
-            return {
-                "answer": answer,
-                "confidence": self._calculate_confidence(processed_question, relevant_entities),
-                "source_entities": relevant_entities
-            }
-            
-        except Exception as e:
-            logger.error(f"Error processing question: {str(e)}")
-            return {
-                "answer": "I encountered an error while processing your question. Please try again.",
-                "confidence": 0.0
-            }
-    
-    def _generate_answer(
-        self,
-        question: str,
-        question_type: str,
-        primary_entity: Dict[str, Any],
-        relationships: List[Dict[str, Any]]
-    ) -> str:
-        if question_type == "factual":
-            return self._generate_factual_answer(primary_entity, relationships)
-        elif question_type == "explanatory":
-            return self._generate_explanatory_answer(primary_entity, relationships)
-        elif question_type == "temporal_spatial":
-            return self._generate_temporal_spatial_answer(primary_entity, relationships)
-        else:
-            return self._generate_general_answer(primary_entity, relationships)
-    
-    def _generate_factual_answer(self, entity: Dict[str, Any], relationships: List[Dict[str, Any]]) -> str:
-        # Implementation for factual questions
-        return f"Based on the information in our knowledge base, {entity.get('name', 'this entity')} is associated with {len(relationships)} related entities."
-    
-    def _generate_explanatory_answer(self, entity: Dict[str, Any], relationships: List[Dict[str, Any]]) -> str:
-        # Implementation for explanatory questions
-        return f"Here's what we know about {entity.get('name', 'this entity')}: {self._format_relationships(relationships)}"
-    
-    def _generate_temporal_spatial_answer(self, entity: Dict[str, Any], relationships: List[Dict[str, Any]]) -> str:
-        # Implementation for temporal/spatial questions
-        return f"Regarding the time and location of {entity.get('name', 'this entity')}: {self._format_relationships(relationships)}"
-    
-    def _generate_general_answer(self, entity: Dict[str, Any], relationships: List[Dict[str, Any]]) -> str:
-        # Implementation for general questions
-        return f"Here's what we know about {entity.get('name', 'this entity')}: {self._format_relationships(relationships)}"
-    
-    def _format_relationships(self, relationships: List[Dict[str, Any]]) -> str:
-        if not relationships:
-            return "No specific relationships found."
-        return " ".join([f"{rel.get('type', 'related to')} {rel.get('target', 'another entity')}" for rel in relationships[:3]])
-    
-    def _calculate_confidence(self, processed_question: Dict[str, Any], relevant_entities: List[Dict[str, Any]]) -> float:
-        # Simple confidence calculation based on entity match and question processing
-        entity_match_score = len(relevant_entities) / max(1, len(processed_question["entities"]))
-        return min(1.0, entity_match_score * 0.8)  # Cap at 0.8 to account for uncertainty
-    
-    def close(self):
-        self.db_client.close() 
+        return 0.8 
